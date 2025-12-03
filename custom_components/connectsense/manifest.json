@@ -1,0 +1,19 @@
+{
+  "domain": "connectsense",
+  "name": "ConnectSense",
+  "codeowners": ["@JonathanWitthoeft"],
+  "config_flow": true,
+  "documentation": "https://github.com/connectsense/homeassistant.custom",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/connectsense/homeassistant.custom/issues",
+  "loggers": ["connectsense"],
+  "quality_scale": "bronze",
+  "version": "0.1.0",
+  "zeroconf": [
+    {
+      "type": "_https._tcp.local.",
+      "name": "reboote*",
+      "properties": { "api": "local", "protocol": "https" }
+    }
+  ]
+}
