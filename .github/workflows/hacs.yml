@@ -1,0 +1,19 @@
+name: HACS
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  hacs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: HACS validation (integration)
+        uses: hacs/action@main
+        with:
+          category: integration
+          ignore: brands
