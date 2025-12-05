@@ -640,6 +640,52 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConnectSenseConfigEntry)
         cfg = await _get_device_config(hass, entry)
         if not isinstance(cfg, dict):
             return
+        # If options are empty (first setup), populate them from device config without pushing back
+        if not entry.options:
+            new_opts: dict[str, Any] = {}
+            if "off_duration" in cfg:
+                try:
+                    new_opts[CONF_AR_OFF_SECONDS] = int(cfg.get("off_duration", DEFAULT_AR_OFF_SECONDS))
+                except Exception:
+                    pass
+            if "max_auto_reboots" in cfg:
+                try:
+                    new_opts[CONF_AR_MAX_REBOOTS] = int(cfg.get("max_auto_reboots", DEFAULT_AR_MAX_REBOOTS))
+                except Exception:
+                    pass
+            if "enable_power_fail_reboot" in cfg:
+                new_opts[CONF_AR_POWER_FAIL] = bool(cfg.get("enable_power_fail_reboot", DEFAULT_AR_POWER_FAIL))
+            if "enable_ping_fail_reboot" in cfg:
+                new_opts[CONF_AR_PING_FAIL] = bool(cfg.get("enable_ping_fail_reboot", DEFAULT_AR_PING_FAIL))
+            ping_cfg = cfg.get("ping_config")
+            if isinstance(ping_cfg, dict):
+                if "any_fail_logic" in ping_cfg:
+                    new_opts[CONF_AR_ANY_FAIL] = bool(ping_cfg.get("any_fail_logic", DEFAULT_AR_ANY_FAIL))
+                if "outage_trigger_time" in ping_cfg:
+                    try:
+                        new_opts[CONF_AR_TRIGGER_MIN] = int(
+                            ping_cfg.get("outage_trigger_time", DEFAULT_AR_TRIGGER_MIN)
+                        )
+                    except Exception:
+                        pass
+                if "detection_delay" in ping_cfg:
+                    try:
+                        new_opts[CONF_AR_DELAY_MIN] = int(
+                            ping_cfg.get("detection_delay", DEFAULT_AR_DELAY_MIN)
+                        )
+                    except Exception:
+                        pass
+                targets = ping_cfg.get("target_addrs")
+                if isinstance(targets, list):
+                    for i, key in enumerate(
+                        (CONF_AR_TARGET_1, CONF_AR_TARGET_2, CONF_AR_TARGET_3, CONF_AR_TARGET_4, CONF_AR_TARGET_5)
+                    ):
+                        new_opts[key] = targets[i] if i < len(targets) else ""
+            if new_opts:
+                store = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+                store["skip_push_once"] = True
+                hass.config_entries.async_update_entry(entry, options=new_opts)
+                store["entry_options_snapshot"] = dict(new_opts)
         changed = {}
         if "enable_power_fail_reboot" in cfg:
             val = bool(cfg["enable_power_fail_reboot"])
