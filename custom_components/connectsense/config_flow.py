@@ -6,6 +6,7 @@ from typing import Any
 import voluptuous as vol
 
 import socket
+import ipaddress
 import asyncio
 
 from homeassistant import config_entries
@@ -52,7 +53,7 @@ async def _probe_serial_over_https(hass, entry_or_host) -> str | None:
     if not host:
         return None
 
-    client = build_probe_client(hass, host)
+    client = await build_probe_client(hass, host)
 
     try:
         data = await client.get_info()
@@ -145,7 +146,6 @@ async def _mdns_hostname_for_ip(hass, ip: str, timeout: float = 2.0) -> str | No
         return None
 
 
-
 def _norm_host(s: str | None) -> str:
     s = (s or "").strip()
     if s.endswith("."):
@@ -163,6 +163,7 @@ class RebooterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_show_form(step_id="user", data_schema=USER_SCHEMA)
     
         host = _norm_host(user_input.get(CONF_HOST))
+        _LOGGER.debug("User step received host input: %s", host)
         
         # Guard against empty/invalid host field
         if not host:
@@ -175,8 +176,8 @@ class RebooterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ipaddress.ip_address(host)
             is_ip = True
             _LOGGER.debug("User entered IP '%s'; downstream SSL helper should disable hostname verification.", host)
-        except ValueError:
-            pass
+        except Exception as exc:
+            _LOGGER.debug("Host '%s' is not an IP (%r); keeping as hostname.", host, exc)
     
         if is_ip:
             # Prefer a true mDNS hostname (e.g. rebooter-pro-2.local) over the IP

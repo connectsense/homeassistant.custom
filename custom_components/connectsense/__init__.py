@@ -172,7 +172,7 @@ async def _probe_serial_over_https(hass, entry_or_host) -> str | None:
     if entry is not None:
         client = await async_get_client(hass, entry)
     else:
-        client = build_probe_client(hass, host)
+        client = await build_probe_client(hass, host)
 
     try:
         data = await client.get_info()

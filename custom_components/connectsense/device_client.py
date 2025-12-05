@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from functools import lru_cache
+from pathlib import Path
+
 from rebooterpro_async import RebooterProClient
 
 from homeassistant.const import CONF_HOST
@@ -27,7 +30,26 @@ async def async_close_client(hass, entry_id: str) -> None:
         await client.aclose()
 
 
-def build_probe_client(hass, host: str) -> RebooterProClient:
+async def build_probe_client(hass, host: str) -> RebooterProClient:
     """Construct a transient client for probing a host during flows."""
     session = async_get_clientsession(hass)
-    return RebooterProClient(host, session=session)
+    ca_bundle = await _get_ca_bundle_offthread(hass)
+    # Avoid blocking the event loop when loading the embedded CA; build the client in an executor.
+    return await hass.async_add_executor_job(
+        lambda: RebooterProClient(host, session=session, ca_bundle=ca_bundle)
+    )
+
+
+@lru_cache(maxsize=1)
+def _cached_ca_path() -> Path | None:
+    from importlib.resources import files
+    try:
+        path = files("rebooterpro_async.data") / "device_ca.pem"
+        return path if path.exists() else None
+    except Exception:
+        return None
+
+
+async def _get_ca_bundle_offthread(hass) -> Path | None:
+    """Load the embedded CA path off the event loop."""
+    return await hass.async_add_executor_job(_cached_ca_path)
