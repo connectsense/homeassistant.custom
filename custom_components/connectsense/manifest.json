@@ -9,7 +9,7 @@
   "loggers": ["connectsense"],
   "quality_scale": "bronze",
   "requirements": ["rebooterpro-async==0.1.0"],
-  "version": "0.2.0",
+  "version": "0.3.0",
   "zeroconf": [
     {
       "type": "_https._tcp.local.",

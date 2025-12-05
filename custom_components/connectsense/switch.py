@@ -305,13 +305,15 @@ class _RebooterConfigFlagSwitch(SwitchEntity):
             await client.set_partial_config(payload)
             _LOGGER.debug("Partial config applied")
 
-            # Update HA options to match (this will trigger your options listener)
             new_opts = dict(self.entry.options or {})
             new_opts[self._option_key] = desired
+            # Prevent the options listener from immediately pushing a full /config after this partial update.
+            store = self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry.entry_id, {})
+            store["skip_push_once"] = True
+            # Update HA options to match (listener will see skip flag and avoid a full push)
             self.hass.config_entries.async_update_entry(self.entry, options=new_opts)
 
             # Update in-memory state immediately and notify listeners
-            store = self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry.entry_id, {})
             state = store.setdefault("state", {})
             state[self._flag_key_store] = desired
             async_dispatcher_send(
