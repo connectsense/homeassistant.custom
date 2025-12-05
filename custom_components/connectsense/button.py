@@ -3,16 +3,14 @@ from __future__ import annotations
 import logging
 import asyncio
 
-from .ssl_utils import get_aiohttp_ssl
-
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.components.button import ButtonEntity, ButtonDeviceClass
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.const import CONF_HOST
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.config_entries import ConfigEntry
 from .models import ConnectSenseConfigEntry
+from .device_client import async_get_client
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,24 +98,18 @@ class RebooterRebootButton(ButtonEntity):
             _LOGGER.exception("Failed to send manual reboot notification via %s.%s", domain, service)
 
     async def async_press(self) -> None:
-        host = self.entry.data[CONF_HOST]
-        base = f"https://{host}:443"
+        try:
+            client = await async_get_client(self.hass, self.entry)
+            await client.reboot_outlet()
+        except Exception as exc:
+            raise HomeAssistantError("Device rejected reboot request.") from exc
 
-        session = async_get_clientsession(self.hass)
-        ssl_ctx = await get_aiohttp_ssl(self.hass, self.entry)
+        # Optimistically set the outlet to ON in HA after a successful reboot command
+        async_dispatcher_send(
+            self.hass,
+            f"{SIGNAL_UPDATE}_{self.entry.entry_id}",
+            {"outlet_active": True}
+        )
 
-        async with session.post(f"{base}/control", json={"outlet_reboot": True}, ssl=ssl_ctx, timeout=8) as r:
-            text = await r.text()
-            if r.status >= 400:
-                raise HomeAssistantError(f"Device rejected reboot ({r.status}): {text[:200]}")
-            _LOGGER.debug("Reboot command responded %s: %s", r.status, text[:300])
-            
-            # Optimistically set the outlet to ON in HA after a successful reboot command
-            async_dispatcher_send(
-                self.hass,
-                f"{SIGNAL_UPDATE}_{self.entry.entry_id}",
-                {"outlet_active": True}
-            )
-        
-            # Send the static push notification now that we have a 2xx
-            await self._send_manual_reboot_notification()
+        # Send the static push notification now that we have a 2xx
+        await self._send_manual_reboot_notification()

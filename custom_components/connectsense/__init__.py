@@ -4,17 +4,16 @@ from aiohttp import web
 
 import logging
 import re
-import aiohttp
 import asyncio
-import re
-import ipaddress
-from urllib.parse import urlparse
 from typing import Any
 
 import voluptuous as vol
 
 import ssl
-from .ssl_utils import get_aiohttp_ssl
+from rebooterpro_async import (
+    RebooterConnectionError,
+    RebooterHttpError,
+)
 
 import secrets
 from datetime import timedelta
@@ -26,13 +25,13 @@ from homeassistant.config_entries import (
     ConfigEntryAuthFailed,
     ConfigEntryNotReady,
 )
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.components import webhook
 from homeassistant.const import CONF_HOST, CONF_TYPE, CONF_DEVICE_ID
 from homeassistant.util import dt as dt_util
 from .device_trigger import REBOOT_EVENT
 from .models import ConnectSenseConfigEntry, ConnectSenseRuntimeData
+from .device_client import async_get_client, async_close_client, build_probe_client
 
 
 from .const import (
@@ -85,24 +84,11 @@ PLATFORMS = ["switch", "button"]
 _LOGGER = logging.getLogger(__name__)
 
 async def _get_device_config(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any] | None:
-    """GET https://<host>:443/config (return dict or None on error)."""
-    host = entry.data[CONF_HOST]
-    base = f"https://{host}:443"
-    session = async_get_clientsession(hass)
-    ssl_ctx = await get_aiohttp_ssl(hass, entry)
-
+    """GET device config; returns dict or None on error."""
+    client = await async_get_client(hass, entry)
     try:
-        async with session.get(f"{base}/config", ssl=ssl_ctx, timeout=10) as r:
-            text = await r.text()  # capture for diagnostics
-            if r.status != 200:
-                _LOGGER.debug("GET /config %s -> %s; body=%s", host, r.status, text[:500])
-                return None
-            try:
-                data = await r.json(content_type=None)  # parse even if Content-Type is wrong
-            except Exception as e:
-                _LOGGER.debug("GET /config %s JSON decode failed: %r; body=%s", host, e, text[:500])
-                return None
-            return data if isinstance(data, dict) else None
+        data = await client.get_config()
+        return data if isinstance(data, dict) else None
     except Exception as e:
         _LOGGER.debug("Exception in _get_device_config: %r", e, exc_info=True)
         return None
@@ -182,29 +168,14 @@ async def _probe_serial_over_https(hass, entry_or_host) -> str | None:
     if not host:
         return None
 
-    base = f"https://{host}:443"
-    session = async_get_clientsession(hass)
-
-    # SSL context selection:
-    # - If we have a ConfigEntry, use your existing helper (unchanged).
-    # - If we only have a host string:
-    #     * IP -> disable verification (False)
-    #     * hostname -> use your existing helper
+    client: RebooterProClient
     if entry is not None:
-        ssl_ctx = await get_aiohttp_ssl(hass, entry)
+        client = await async_get_client(hass, entry)
     else:
-        try:
-            ipaddress.ip_address(host)
-            ssl_ctx = False  # IP: skip hostname verification
-        except ValueError:
-            ssl_ctx = False
+        client = build_probe_client(hass, host)
 
     try:
-        async with session.get(f"{base}/info", ssl=ssl_ctx, timeout=8) as r:
-            if r.status != 200:
-                _LOGGER.debug("GET /info on %s returned %s", host, r.status)
-                return None
-            data = await r.json(content_type=None)
+        data = await client.get_info()
     except Exception as exc:
         _LOGGER.debug("GET /info failed for %s: %r", host, exc)
         return None
@@ -229,19 +200,12 @@ async def _probe_serial_over_https(hass, entry_or_host) -> str | None:
 
 async def _push_auto_reboot_to_device(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """POST the automatic reboot configuration to https://<host>:443/config."""
-    host = entry.data[CONF_HOST]
-    port = 443
-    base = f"https://{host}:{port}"
     payload = _build_device_config_payload(entry)
 
-    session = async_get_clientsession(hass)
-    ssl_ctx = await get_aiohttp_ssl(hass, entry)
-
-    _LOGGER.debug("Pushing /config to %s: %s", host, payload)
-    async with session.post(f"{base}/config", json=payload, ssl=ssl_ctx, timeout=10) as r:
-        body = await r.text()
-        _LOGGER.debug("Device /config responded %s: %s", r.status, body[:500])
-        r.raise_for_status()
+    client = await async_get_client(hass, entry)
+    _LOGGER.debug("Pushing /config to %s: %s", entry.data[CONF_HOST], payload)
+    resp = await client.set_config(payload)
+    _LOGGER.debug("Device /config responded: %s", resp)
 
 # ---------- Helpers ----------
 
@@ -565,35 +529,13 @@ async def _push_webhook_to_device(hass: HomeAssistant, entry: ConfigEntry, wh_ur
     Payload schema expected by device:
       { "url": "<webhook_url>", "port": <int>, "headers": {"Authorization": "Bearer <token>"}  # present only if token exists }
     """
-    host = entry.data[CONF_HOST]
-    port = 443
+    token = override_token or entry.data.get(CONF_WEBHOOK_TOKEN_CURRENT)
+    client = await async_get_client(hass, entry)
 
-    # Choose token: override (for rotation) or current stored token
-    token = override_token or entry.data.get(CONF_WEBHOOK_TOKEN_CURRENT)    
-
-    # Derive default port from webhook URL if not set by user
-    parsed = urlparse(wh_url)
-    notify_port = parsed.port or (443 if parsed.scheme == "https" else 80)
-
-    payload = {"url": wh_url, "port": notify_port}
-    if token:
-        payload["headers"] = {"Authorization": f"Bearer {token}"}
-
-    base = f"https://{host}:{port}"
-    session = async_get_clientsession(hass)
-    ssl_ctx = await get_aiohttp_ssl(hass, entry)
-
-    # Redact token in logs
-    if token:
-        redacted = {"url": wh_url, "port": notify_port, "headers": {"Authorization": "Bearer <redacted>"}}
-    else:
-        redacted = {"url": wh_url, "port": notify_port}
-    _LOGGER.debug("Posting webhook to device %s:%s payload=%s", host, port, redacted)
-
-    async with session.post(f"{base}/notify", json=payload, ssl=ssl_ctx, timeout=10) as r:
-        body = await r.text()
-        _LOGGER.debug("Device responded %s: %s", r.status, body[:500])
-        r.raise_for_status()
+    redacted = {"url": wh_url, "headers": {"Authorization": "Bearer <redacted>"}} if token else {"url": wh_url}
+    _LOGGER.debug("Posting webhook to device %s payload=%s", entry.data[CONF_HOST], redacted)
+    resp = await client.push_webhook(wh_url, token=token)
+    _LOGGER.debug("Device responded to webhook push: %s", resp)
 
 async def _options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
     store = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
@@ -669,6 +611,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConnectSenseConfigEntry)
     store = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
     state = store.setdefault("state", {})
 
+    # Shared device client for this entry
+    await async_get_client(hass, entry)
+
     # Ensure a current token exists (prev/grace managed elsewhere)
     await _ensure_tokens(hass, entry)
 
@@ -681,11 +626,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConnectSenseConfigEntry)
     _, wh_url = await _register_webhook(hass, entry)
     try:
         await _push_webhook_to_device(hass, entry, wh_url)
-    except aiohttp.ClientResponseError as exc:
+    except RebooterHttpError as exc:
         if exc.status in (401, 403):
             raise ConfigEntryAuthFailed from exc
         raise ConfigEntryNotReady from exc
-    except (aiohttp.ClientError, asyncio.TimeoutError, ssl.SSLError) as exc:
+    except (RebooterConnectionError, asyncio.TimeoutError, ssl.SSLError) as exc:
         raise ConfigEntryNotReady from exc
     except Exception as exc:
         _LOGGER.warning("Could not register webhook with device now: %s", exc)
@@ -797,6 +742,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConnectSenseConfigEntry
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
+        await async_close_client(hass, entry.entry_id)
         wh_id = entry.data.get("webhook_id")
         if wh_id:
             webhook.async_unregister(hass, wh_id)

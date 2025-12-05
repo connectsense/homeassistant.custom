@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import logging
 import asyncio
-import ssl
-import aiohttp
-
 from datetime import timedelta
 from typing import Any
 
@@ -15,13 +12,13 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.components.switch import SwitchEntity, SwitchDeviceClass
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.const import CONF_HOST
 from homeassistant.config_entries import ConfigEntry
 
 from .models import ConnectSenseConfigEntry
+from .device_client import async_get_client
 
 from .const import (
     DOMAIN,
@@ -31,8 +28,6 @@ from .const import (
     DEFAULT_AR_POWER_FAIL,
     DEFAULT_AR_PING_FAIL,
 )
-from .ssl_utils import get_aiohttp_ssl
-
 _LOGGER = logging.getLogger(__name__)
 MUTE_SECONDS = 8
 
@@ -136,21 +131,15 @@ class RebooterOutletSwitch(SwitchEntity):
         self.schedule_update_ha_state()
 
     async def _fetch_initial_state(self):
-        host = self.entry.data[CONF_HOST]
-        base = f"https://{host}:443"
-
-        ssl_ctx = await get_aiohttp_ssl(self.hass, self.entry)
-        session = async_get_clientsession(self.hass)
-
         try:
-            async with session.get(f"{base}/control", ssl=ssl_ctx, timeout=8) as r:
-                data = await r.json(content_type=None)
-                if isinstance(data, dict) and "outlet_active" in data:
-                    self._is_on = bool(data["outlet_active"])
-                    _LOGGER.debug("Seeded initial outlet_active=%s from GET /control", self._is_on)
-                    self.async_write_ha_state()
-                else:
-                    _LOGGER.debug("GET /control returned unexpected payload: %s", data)
+            client = await async_get_client(self.hass, self.entry)
+            data = await client.get_control_state()
+            if isinstance(data, dict) and "outlet_active" in data:
+                self._is_on = bool(data["outlet_active"])
+                _LOGGER.debug("Seeded initial outlet_active=%s from GET /control", self._is_on)
+                self.async_write_ha_state()
+            else:
+                _LOGGER.debug("GET /control returned unexpected payload: %s", data)
         except Exception as exc:
             _LOGGER.debug("Initial GET /control failed (%s); leaving state unknown", exc)
 
@@ -176,14 +165,9 @@ class RebooterOutletSwitch(SwitchEntity):
             raise  # let the friendly error bubble to the UI
 
     async def _post_control(self, body: dict):
-        host = self.entry.data[CONF_HOST]
-        base = f"https://{host}:443"
-
-        ssl_ctx = await get_aiohttp_ssl(self.hass, self.entry)
-        session = async_get_clientsession(self.hass)
-
         _LOGGER.debug("POST /control -> %s", body)
         try:
+            client = await async_get_client(self.hass, self.entry)
             store = self.hass.data[DOMAIN].setdefault(self.entry.entry_id, {})
             # store the last actor for incoming notification
             actor = await self._resolve_actor_name()
@@ -192,53 +176,23 @@ class RebooterOutletSwitch(SwitchEntity):
             
             # Start/extend the mute window so codes 1/2 webhooks are ignored briefly
             store["mute_until"] = dt_util.utcnow() + timedelta(seconds=MUTE_SECONDS)    
-                    
-            async with session.post(
-                f"{base}/control", json=body, ssl=ssl_ctx, timeout=8
-            ) as r:
-                text = await r.text()
-                if r.status >= 400:
-                    # Convert device/server errors into a clean HA error with a short message
-                    raise HomeAssistantError(f"Device rejected command ({r.status}): {text[:200]}")
-                _LOGGER.debug("Device responded %s: %s", r.status, text[:300])
+            await client.set_outlet_state(bool(body.get("outlet_active", True)))
 
-                # Re-schedule a single confirmation fetch at window end
-                if self._confirm_task and not self._confirm_task.done():
-                    self._confirm_task.cancel()
-                self._confirm_task = self.hass.async_create_task(self._confirm_after_timeout())
+            # Re-schedule a single confirmation fetch at window end
+            if self._confirm_task and not self._confirm_task.done():
+                self._confirm_task.cancel()
+            self._confirm_task = self.hass.async_create_task(self._confirm_after_timeout())
 
 
-        except asyncio.TimeoutError as e:
+        except Exception as e:
             store = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
             if store:
                 store.pop("last_actor", None)
                 store.pop("mute_until", None)
-            _LOGGER.warning("Rebooter Pro: command timed out after 8s")
-            raise HomeAssistantError("Rebooter Pro didn’t respond in time (8s).") from e
-
-        except aiohttp.ClientConnectorError as e:
-            store = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
-            if store:
-                store.pop("last_actor", None)
-                store.pop("mute_until", None)
-            _LOGGER.warning("Rebooter Pro: network error: %s", e)
-            raise HomeAssistantError("Network error talking to Rebooter Pro.") from e
-
-        except aiohttp.ClientError as e:
-            store = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
-            if store:
-                store.pop("last_actor", None)
-                store.pop("mute_until", None)
-            _LOGGER.warning("Rebooter Pro: HTTP error: %s", e)
-            raise HomeAssistantError("HTTP error talking to Rebooter Pro.") from e
-
-        except ssl.SSLError as e:
-            store = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
-            if store:
-                store.pop("last_actor", None)
-                store.pop("mute_until", None)
-            _LOGGER.warning("Rebooter Pro: SSL error (certificate/hostname): %s", e)
-            raise HomeAssistantError("SSL error (certificate/hostname mismatch).") from e
+            _LOGGER.warning("Rebooter Pro: command error: %s", e)
+            if isinstance(e, asyncio.TimeoutError):
+                raise HomeAssistantError("Rebooter Pro didn’t respond in time.") from e
+            raise HomeAssistantError("Error talking to Rebooter Pro.") from e
 
         except asyncio.CancelledError:
             store = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
@@ -343,24 +297,13 @@ class _RebooterConfigFlagSwitch(SwitchEntity):
         self._is_on = desired
         self.async_write_ha_state()
 
-        host = self.entry.data[CONF_HOST]
-        base = f"https://{host}:443"
-        ssl_ctx = await get_aiohttp_ssl(self.hass, self.entry)
-        session = async_get_clientsession(self.hass)
-
         payload = {self._device_field: desired}
         _LOGGER.debug("POST /config partial -> %s", payload)
 
         try:
-            async with session.post(
-                f"{base}/config", json=payload, ssl=ssl_ctx, timeout=8
-            ) as r:
-                text = await r.text()
-                if r.status >= 400:
-                    raise HomeAssistantError(
-                        f"Device rejected config ({r.status}): {text[:200]}"
-                    )
-                _LOGGER.debug("Partial config applied %s: %s", r.status, text[:300])
+            client = await async_get_client(self.hass, self.entry)
+            await client.set_partial_config(payload)
+            _LOGGER.debug("Partial config applied")
 
             # Update HA options to match (this will trigger your options listener)
             new_opts = dict(self.entry.options or {})
@@ -381,7 +324,7 @@ class _RebooterConfigFlagSwitch(SwitchEntity):
             # Revert UI on any error
             self._is_on = prev
             self.async_write_ha_state()
-            raise
+            raise HomeAssistantError("Error updating device config.") from e
 
 # Power-fail auto-reboot toggle
 class RebooterPowerFailSwitch(_RebooterConfigFlagSwitch):

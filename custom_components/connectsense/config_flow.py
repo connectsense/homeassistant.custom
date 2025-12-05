@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import re
-import ipaddress
 from typing import Any
 import voluptuous as vol
 
@@ -11,8 +10,7 @@ import asyncio
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from .ssl_utils import get_aiohttp_ssl
+from .device_client import build_probe_client
 
 from .const import DOMAIN
 
@@ -54,29 +52,10 @@ async def _probe_serial_over_https(hass, entry_or_host) -> str | None:
     if not host:
         return None
 
-    base = f"https://{host}:443"
-    session = async_get_clientsession(hass)
-
-    # SSL context selection:
-    # - If we have a ConfigEntry, use your existing helper (unchanged).
-    # - If we only have a host string:
-    #     * IP -> disable verification (False)
-    #     * hostname -> use default verification (None)
-    if entry is not None:
-        ssl_ctx = await get_aiohttp_ssl(hass, entry)
-    else:
-        try:
-            ipaddress.ip_address(host)
-            ssl_ctx = False  # IP: skip hostname verification
-        except ValueError:
-            ssl_ctx = False
+    client = build_probe_client(hass, host)
 
     try:
-        async with session.get(f"{base}/info", ssl=ssl_ctx, timeout=8) as r:
-            if r.status != 200:
-                _LOGGER.debug("GET /info on %s returned %s", host, r.status)
-                return None
-            data = await r.json(content_type=None)
+        data = await client.get_info()
     except Exception as exc:
         _LOGGER.debug("GET /info failed for %s: %r", host, exc)
         return None

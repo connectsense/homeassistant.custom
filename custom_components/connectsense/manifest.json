@@ -8,7 +8,8 @@
   "issue_tracker": "https://github.com/connectsense/homeassistant.custom/issues",
   "loggers": ["connectsense"],
   "quality_scale": "bronze",
-  "version": "0.1.0",
+  "requirements": ["rebooterpro-async==0.1.0"],
+  "version": "0.2.0",
   "zeroconf": [
     {
       "type": "_https._tcp.local.",

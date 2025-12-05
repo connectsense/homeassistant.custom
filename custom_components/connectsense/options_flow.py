@@ -8,7 +8,6 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
@@ -48,7 +47,7 @@ from .const import (
     DEFAULT_AR_POWER_FAIL,
     DEFAULT_AR_TRIGGER_MIN,
 )
-from .ssl_utils import get_aiohttp_ssl
+from .device_client import async_get_client
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -102,22 +101,11 @@ class RebooterOptionsFlowHandler(config_entries.OptionsFlow):
     async def _fetch_device_config(self) -> dict[str, Any] | None:
         """GET /config from the device to prefill defaults."""
         host = self._config_entry.data[CONF_HOST]
-        base = f"https://{host}:443"
-        session = async_get_clientsession(self.hass)
-        ssl_ctx = await get_aiohttp_ssl(self.hass, self._config_entry)
+        client = await async_get_client(self.hass, self._config_entry)
         try:
-            _LOGGER.debug("_fetch_device_config calling get to %s/config", base)
-            async with session.get(f"{base}/config", ssl=ssl_ctx, timeout=10) as r:
-                txt = await r.text()  # always capture for diagnostics
-                if r.status != 200:
-                    _LOGGER.debug("GET /config %s -> %s; body=%s", host, r.status, txt[:500])
-                    return None
-                try:
-                    data = await r.json(content_type=None)
-                except Exception as e:
-                    _LOGGER.debug("GET /config %s JSON decode failed: %r; body=%s", host, e, txt[:500])
-                    return None
-                return data if isinstance(data, dict) else None
+            _LOGGER.debug("_fetch_device_config calling get to https://%s/config", host)
+            data = await client.get_config()
+            return data if isinstance(data, dict) else None
         except Exception as e:
             _LOGGER.debug("Exception in _fetch_device_config: %r", e, exc_info=True)
             return None
