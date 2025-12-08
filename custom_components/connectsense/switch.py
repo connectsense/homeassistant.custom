@@ -5,6 +5,7 @@ import asyncio
 from datetime import timedelta
 from typing import Any
 
+from rebooterpro_async import RebooterDecodeError
 
 from homeassistant.util import dt as dt_util
 from homeassistant.auth.models import User
@@ -166,6 +167,7 @@ class RebooterOutletSwitch(SwitchEntity):
 
     async def _post_control(self, body: dict):
         _LOGGER.debug("POST /control -> %s", body)
+        success = False
         try:
             client = await async_get_client(self.hass, self.entry)
             store = self.hass.data[DOMAIN].setdefault(self.entry.entry_id, {})
@@ -177,12 +179,11 @@ class RebooterOutletSwitch(SwitchEntity):
             # Start/extend the mute window so codes 1/2 webhooks are ignored briefly
             store["mute_until"] = dt_util.utcnow() + timedelta(seconds=MUTE_SECONDS)    
             await client.set_outlet_state(bool(body.get("outlet_active", True)))
-
-            # Re-schedule a single confirmation fetch at window end
-            if self._confirm_task and not self._confirm_task.done():
-                self._confirm_task.cancel()
-            self._confirm_task = self.hass.async_create_task(self._confirm_after_timeout())
-
+            success = True
+        except RebooterDecodeError as exc:
+            # Some firmware builds return plain "OK" instead of JSON; treat as success.
+            _LOGGER.debug("Non-JSON /control response treated as success: %s", exc)
+            success = True
 
         except Exception as e:
             store = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
@@ -201,6 +202,12 @@ class RebooterOutletSwitch(SwitchEntity):
                 store.pop("mute_until", None)
             _LOGGER.debug("Rebooter Pro: command cancelled")
             raise HomeAssistantError("Command cancelled.")
+        finally:
+            if success:
+                # Re-schedule a single confirmation fetch at window end
+                if self._confirm_task and not self._confirm_task.done():
+                    self._confirm_task.cancel()
+                self._confirm_task = self.hass.async_create_task(self._confirm_after_timeout())
 
     async def _confirm_after_timeout(self):
         try:
@@ -302,7 +309,11 @@ class _RebooterConfigFlagSwitch(SwitchEntity):
 
         try:
             client = await async_get_client(self.hass, self.entry)
-            await client.set_partial_config(payload)
+            try:
+                await client.set_partial_config(payload)
+            except RebooterDecodeError as exc:
+                # Some firmware returns plain "OK" instead of JSON; treat as success.
+                _LOGGER.debug("Non-JSON /config partial response treated as success: %s", exc)
             _LOGGER.debug("Partial config applied")
 
             new_opts = dict(self.entry.options or {})

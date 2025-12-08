@@ -12,6 +12,7 @@ import voluptuous as vol
 import ssl
 from rebooterpro_async import (
     RebooterConnectionError,
+    RebooterDecodeError,
     RebooterHttpError,
 )
 
@@ -204,7 +205,11 @@ async def _push_auto_reboot_to_device(hass: HomeAssistant, entry: ConfigEntry) -
 
     client = await async_get_client(hass, entry)
     _LOGGER.debug("Pushing /config to %s: %s", entry.data[CONF_HOST], payload)
-    resp = await client.set_config(payload)
+    try:
+        resp = await client.set_config(payload)
+    except RebooterDecodeError as exc:
+        _LOGGER.debug("Non-JSON /config response treated as success: %s", exc)
+        resp = None
     _LOGGER.debug("Device /config responded: %s", resp)
 
 # ---------- Helpers ----------
@@ -534,7 +539,12 @@ async def _push_webhook_to_device(hass: HomeAssistant, entry: ConfigEntry, wh_ur
 
     redacted = {"url": wh_url, "headers": {"Authorization": "Bearer <redacted>"}} if token else {"url": wh_url}
     _LOGGER.debug("Posting webhook to device %s payload=%s", entry.data[CONF_HOST], redacted)
-    resp = await client.push_webhook(wh_url, token=token)
+    try:
+        resp = await client.push_webhook(wh_url, token=token)
+    except RebooterDecodeError as exc:
+        # Some firmware returns bare "OK" instead of JSON; treat as success.
+        _LOGGER.debug("Non-JSON webhook response treated as success: %s", exc)
+        resp = None
     _LOGGER.debug("Device responded to webhook push: %s", resp)
 
 async def _options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:

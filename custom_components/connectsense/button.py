@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+from rebooterpro_async import RebooterDecodeError
 
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.components.button import ButtonEntity, ButtonDeviceClass
@@ -101,6 +102,9 @@ class RebooterRebootButton(ButtonEntity):
         try:
             client = await async_get_client(self.hass, self.entry)
             await client.reboot_outlet()
+        except RebooterDecodeError as exc:
+            # Some firmware returns plain "OK" instead of JSON; treat as success.
+            _LOGGER.debug("Non-JSON /control response treated as success: %s", exc)
         except Exception as exc:
             raise HomeAssistantError("Device rejected reboot request.") from exc
 
